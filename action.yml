@@ -1,0 +1,255 @@
+name: 'zrok security review'
+description: 'Multi-agent security code review on pull requests, driven by zrok and OpenCode'
+author: 'diffsec'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  anthropic-api-key:
+    description: 'Anthropic API key for OpenCode to call Claude with'
+    required: true
+  github-token:
+    description: 'Token used to post PR comments and upload SARIF (typically secrets.GITHUB_TOKEN)'
+    required: true
+  base-ref:
+    description: 'Git ref to diff against. Defaults to the PR target branch (origin/$GITHUB_BASE_REF).'
+    required: false
+    default: ''
+  zrok-ref:
+    description: 'Git ref of github.com/diffsec/zrok to build from'
+    required: false
+    default: 'main'
+  opencode-version:
+    description: 'opencode-ai npm package version'
+    required: false
+    default: 'latest'
+  top-n:
+    description: 'Maximum findings to inline in the PR comment (full list goes to SARIF)'
+    required: false
+    default: '10'
+  severity-threshold:
+    description: 'Only inline findings at or above this severity in the PR comment (critical, high, medium, low, info)'
+    required: false
+    default: 'high'
+  block-on:
+    description: 'Fail the check if any finding at or above this severity exists. Empty disables blocking.'
+    required: false
+    default: ''
+  comment-pr:
+    description: 'Whether to post the rendered comment to the PR'
+    required: false
+    default: 'true'
+  upload-sarif:
+    description: 'Whether to upload SARIF to GitHub code-scanning'
+    required: false
+    default: 'true'
+
+outputs:
+  findings-count:
+    description: 'Total findings produced by the review'
+    value: ${{ steps.report.outputs.total }}
+  sarif-path:
+    description: 'Path to the generated SARIF file'
+    value: ${{ steps.report.outputs.sarif-path }}
+  comment-path:
+    description: 'Path to the generated PR comment markdown'
+    value: ${{ steps.report.outputs.comment-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Set up Node (for OpenCode)
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install zrok
+      shell: bash
+      env:
+        ZROK_REF: ${{ inputs.zrok-ref }}
+      run: |
+        set -euo pipefail
+        GOBIN="$RUNNER_TEMP/zrok-bin"
+        mkdir -p "$GOBIN"
+        # Build zrok from source at the requested ref. Once releases exist
+        # this step can switch to a binary download.
+        git clone --depth 1 --branch "$ZROK_REF" https://github.com/diffsec/zrok.git "$RUNNER_TEMP/zrok-src"
+        cd "$RUNNER_TEMP/zrok-src"
+        go build -o "$GOBIN/zrok" .
+        echo "$GOBIN" >> "$GITHUB_PATH"
+        "$GOBIN/zrok" --version
+
+    - name: Install OpenCode
+      shell: bash
+      env:
+        OPENCODE_VERSION: ${{ inputs.opencode-version }}
+      run: |
+        set -euo pipefail
+        npm install -g "opencode-ai@${OPENCODE_VERSION}"
+        opencode --version
+
+    - name: Resolve base ref
+      id: base
+      shell: bash
+      env:
+        INPUT_BASE: ${{ inputs.base-ref }}
+        GH_BASE: ${{ github.base_ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "${INPUT_BASE}" ]; then
+          REF="${INPUT_BASE}"
+        elif [ -n "${GH_BASE}" ]; then
+          # Make sure the base branch is available locally for git diff.
+          git fetch --no-tags --depth=1 origin "${GH_BASE}":"refs/remotes/origin/${GH_BASE}" || true
+          REF="origin/${GH_BASE}"
+        else
+          echo "Error: no base ref provided and not running on a pull_request event" >&2
+          exit 1
+        fi
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+    - name: zrok init + setup
+      id: setup
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.base.outputs.ref }}
+      run: |
+        set -euo pipefail
+        zrok init
+        # --runner opencode emits .opencode/agents/<name>.md (subagents) and
+        # zrok-orchestrator.md (primary). Suggested-agents list goes to JSON.
+        zrok review pr setup --base "$BASE_REF" --runner opencode --json > "$RUNNER_TEMP/setup.json"
+        SUGGESTED=$(jq -r '.suggested_agents | length' "$RUNNER_TEMP/setup.json")
+        CHANGED=$(jq -r '.changed_files | length' "$RUNNER_TEMP/setup.json")
+        echo "suggested-count=$SUGGESTED" >> "$GITHUB_OUTPUT"
+        echo "changed-count=$CHANGED" >> "$GITHUB_OUTPUT"
+        echo "::notice::zrok review scope — $CHANGED changed file(s), $SUGGESTED applicable agent(s)"
+
+    - name: Run OpenCode orchestrator
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        BASE_REF: ${{ steps.base.outputs.ref }}
+      run: |
+        set -euo pipefail
+        # The orchestrator agent file (mode: primary) walks OpenCode through
+        # the recon → analysis → validation → review phases and dispatches
+        # subagents. Findings persist via the zrok CLI; we don't capture the
+        # model's stdout for content, only for telemetry.
+        opencode run --agent zrok-orchestrator \
+          "Run a security review of this pull request scoped to the changed files described in your system prompt." \
+          | tee "$RUNNER_TEMP/opencode-run.log"
+
+    - name: zrok review pr report
+      id: report
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.base.outputs.ref }}
+        TOP_N: ${{ inputs.top-n }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+      run: |
+        set -euo pipefail
+        zrok review pr report \
+          --base "$BASE_REF" \
+          --top-n "$TOP_N" \
+          --severity-threshold "$SEVERITY_THRESHOLD" \
+          --output-dir "$RUNNER_TEMP/zrok-out" \
+          --json > "$RUNNER_TEMP/report.json"
+        TOTAL=$(jq -r '.total' "$RUNNER_TEMP/report.json")
+        SARIF=$(jq -r '.sarif_path' "$RUNNER_TEMP/report.json")
+        COMMENT=$(jq -r '.comment_path' "$RUNNER_TEMP/report.json")
+        echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+        echo "sarif-path=$SARIF" >> "$GITHUB_OUTPUT"
+        echo "comment-path=$COMMENT" >> "$GITHUB_OUTPUT"
+        echo "by_severity=$(jq -c '.by_severity' "$RUNNER_TEMP/report.json")" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF to code-scanning
+      if: ${{ inputs.upload-sarif == 'true' && steps.report.outputs.total != '0' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.report.outputs.sarif-path }}
+        category: zrok
+
+    - name: Post PR comment
+      if: ${{ inputs.comment-pr == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        COMMENT_PATH: ${{ steps.report.outputs.comment-path }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        if [ ! -s "$COMMENT_PATH" ]; then
+          echo "No comment to post"
+          exit 0
+        fi
+        MARKER="<!-- zrok-review-comment -->"
+        # Prepend the marker to the comment body so subsequent runs can find
+        # and replace it instead of stacking duplicate comments on every push.
+        BODY_FILE="$RUNNER_TEMP/zrok-comment-body.md"
+        {
+          printf '%s\n' "$MARKER"
+          cat "$COMMENT_PATH"
+        } > "$BODY_FILE"
+        # Look for an existing zrok comment on this PR. The issue-comments
+        # endpoint lists all comments on the PR conversation tab.
+        EXISTING_ID=$(gh api \
+          -H "Accept: application/vnd.github+json" \
+          "/repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+          | jq -r --arg m "$MARKER" '.[] | select(.body | startswith($m)) | .id' \
+          | head -n1)
+        if [ -n "$EXISTING_ID" ]; then
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/issues/comments/${EXISTING_ID}" \
+            -F "body=@${BODY_FILE}"
+        else
+          gh api -X POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -F "body=@${BODY_FILE}"
+        fi
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: zrok-review
+        path: |
+          ${{ steps.report.outputs.sarif-path }}
+          ${{ steps.report.outputs.comment-path }}
+        if-no-files-found: warn
+
+    - name: Enforce block-on threshold
+      if: ${{ inputs.block-on != '' && steps.report.outputs.total != '0' }}
+      shell: bash
+      env:
+        BLOCK_ON: ${{ inputs.block-on }}
+        BY_SEVERITY: ${{ steps.report.outputs.by_severity }}
+      run: |
+        set -euo pipefail
+        # Severities ordered from most to least severe.
+        declare -A WEIGHT=( [critical]=5 [high]=4 [medium]=3 [low]=2 [info]=1 )
+        BLOCK_WEIGHT=${WEIGHT[$BLOCK_ON]:-0}
+        if [ "$BLOCK_WEIGHT" -eq 0 ]; then
+          echo "Unknown block-on severity '$BLOCK_ON', skipping enforcement" >&2
+          exit 0
+        fi
+        VIOLATIONS=0
+        for sev in critical high medium low info; do
+          if [ "${WEIGHT[$sev]}" -lt "$BLOCK_WEIGHT" ]; then continue; fi
+          N=$(echo "$BY_SEVERITY" | jq -r --arg s "$sev" '.[$s] // 0')
+          if [ "$N" -gt 0 ]; then
+            VIOLATIONS=$((VIOLATIONS + N))
+            echo "::error::zrok found $N $sev finding(s) on this PR (block threshold: $BLOCK_ON)"
+          fi
+        done
+        if [ "$VIOLATIONS" -gt 0 ]; then
+          exit 1
+        fi
