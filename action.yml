@@ -100,17 +100,80 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # ----- zrok install ----------------------------------------------------
+    # Two paths:
+    #   - "release"  — if zrok-ref looks like a release tag (vX.Y.Z), pull
+    #                  the pre-built tarball from GitHub Releases. Skips
+    #                  Go install + clone + build entirely.
+    #   - "source"   — otherwise clone the ref and `go build`. Subsequent
+    #                  runs against the same commit SHA hit actions/cache
+    #                  and skip the rebuild.
+    - name: Resolve zrok install method
+      id: zrok-method
+      shell: bash
+      env:
+        ZROK_REPO: ${{ inputs.zrok-repo }}
+        ZROK_REF: ${{ inputs.zrok-ref }}
+      run: |
+        set -euo pipefail
+        if [[ "$ZROK_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "method=release" >> "$GITHUB_OUTPUT"
+          echo "version=${ZROK_REF#v}" >> "$GITHUB_OUTPUT"
+          echo "::notice::zrok install: release path (ZROK_REF=$ZROK_REF is a tag)"
+        else
+          # Resolve branch/SHA to a canonical commit hash for cache keying.
+          SHA=$(git ls-remote "https://github.com/${ZROK_REPO}.git" "$ZROK_REF" | awk '{print $1}' | head -n1)
+          if [ -z "$SHA" ]; then
+            # ZROK_REF may already be a SHA; in that case ls-remote returns nothing.
+            SHA="$ZROK_REF"
+          fi
+          echo "method=source" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice::zrok install: source build path (sha=$SHA)"
+        fi
+
+    # --- release path: download tarball -----------------------------------
+    - name: Download zrok release binary
+      if: steps.zrok-method.outputs.method == 'release'
+      shell: bash
+      env:
+        ZROK_REPO: ${{ inputs.zrok-repo }}
+        VERSION: ${{ steps.zrok-method.outputs.version }}
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   ARCHIVE="zrok_${VERSION}_linux_amd64.tar.gz" ;;
+          Linux-ARM64) ARCHIVE="zrok_${VERSION}_linux_arm64.tar.gz" ;;
+          macOS-X64)   ARCHIVE="zrok_${VERSION}_darwin_amd64.tar.gz" ;;
+          macOS-ARM64) ARCHIVE="zrok_${VERSION}_darwin_arm64.tar.gz" ;;
+          *) echo "::error::unsupported runner ${RUNNER_OS}-${RUNNER_ARCH} for zrok release download"; exit 1 ;;
+        esac
+        GOBIN="$RUNNER_TEMP/zrok-bin"
+        mkdir -p "$GOBIN"
+        curl -fsSL "https://github.com/${ZROK_REPO}/releases/download/v${VERSION}/${ARCHIVE}" \
+          | tar -xz -C "$GOBIN" zrok
+        chmod +x "$GOBIN/zrok"
+        echo "$GOBIN" >> "$GITHUB_PATH"
+        "$GOBIN/zrok" --version
+
+    # --- source path: setup Go + try cache + build ------------------------
     - name: Set up Go
+      if: steps.zrok-method.outputs.method == 'source'
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
+        cache: false   # we cache the resulting binary instead
 
-    - name: Set up Node (for OpenCode)
-      uses: actions/setup-node@v4
+    - name: Cache built zrok binary
+      if: steps.zrok-method.outputs.method == 'source'
+      id: zrok-cache
+      uses: actions/cache@v4
       with:
-        node-version: '20'
+        path: ${{ runner.temp }}/zrok-bin/zrok
+        key: zrok-bin-${{ runner.os }}-${{ runner.arch }}-${{ steps.zrok-method.outputs.sha }}
 
-    - name: Install zrok
+    - name: Build zrok from source (cache miss)
+      if: steps.zrok-method.outputs.method == 'source' && steps.zrok-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         ZROK_REPO: ${{ inputs.zrok-repo }}
@@ -119,22 +182,51 @@ runs:
         set -euo pipefail
         GOBIN="$RUNNER_TEMP/zrok-bin"
         mkdir -p "$GOBIN"
-        # Build zrok from source at the requested ref. Once releases exist
-        # this step can switch to a binary download.
         git clone --depth 1 --branch "$ZROK_REF" "https://github.com/${ZROK_REPO}.git" "$RUNNER_TEMP/zrok-src"
-        cd "$RUNNER_TEMP/zrok-src"
-        go build -o "$GOBIN/zrok" .
-        echo "$GOBIN" >> "$GITHUB_PATH"
-        "$GOBIN/zrok" --version
+        ( cd "$RUNNER_TEMP/zrok-src" && go build -o "$GOBIN/zrok" . )
 
-    - name: Install OpenCode
+    - name: Activate zrok on PATH
+      if: steps.zrok-method.outputs.method == 'source'
+      shell: bash
+      run: |
+        set -euo pipefail
+        chmod +x "$RUNNER_TEMP/zrok-bin/zrok"
+        echo "$RUNNER_TEMP/zrok-bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/zrok-bin/zrok" --version
+
+    # ----- OpenCode install (cached) ---------------------------------------
+    # Install locally under RUNNER_TEMP so the install path is fully under
+    # our control and trivially cacheable. The npm cache logic is also
+    # picked up by setup-node@v4's cache:npm if available, but the local
+    # node_modules tree is the artifact we actually want to skip.
+    - name: Set up Node (for OpenCode)
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Cache OpenCode install
+      id: opencode-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/opencode-bin
+        key: opencode-${{ runner.os }}-${{ runner.arch }}-${{ inputs.opencode-version }}
+
+    - name: Install OpenCode (cache miss)
+      if: steps.opencode-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         OPENCODE_VERSION: ${{ inputs.opencode-version }}
       run: |
         set -euo pipefail
-        npm install -g "opencode-ai@${OPENCODE_VERSION}"
-        opencode --version
+        mkdir -p "$RUNNER_TEMP/opencode-bin"
+        npm install --prefix "$RUNNER_TEMP/opencode-bin" "opencode-ai@${OPENCODE_VERSION}"
+
+    - name: Activate OpenCode on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "$RUNNER_TEMP/opencode-bin/node_modules/.bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/opencode-bin/node_modules/.bin/opencode" --version
 
     - name: Resolve base ref
       id: base
@@ -181,7 +273,16 @@ runs:
         echo "changed-count=$CHANGED" >> "$GITHUB_OUTPUT"
         echo "::notice::zrok review scope — $CHANGED changed file(s), $SUGGESTED applicable agent(s)"
 
-    - name: Install opengrep
+    # ----- opengrep binary (cached) ---------------------------------------
+    - name: Cache opengrep binary
+      id: opengrep-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/opengrep
+        key: opengrep-${{ runner.os }}-${{ runner.arch }}-${{ inputs.opengrep-version }}
+
+    - name: Install opengrep (cache miss)
+      if: steps.opengrep-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         OPENGREP_VERSION: ${{ inputs.opengrep-version }}
@@ -204,10 +305,39 @@ runs:
         fi
         curl -fsSL "$URL" -o "$RUNNER_TEMP/opengrep"
         chmod +x "$RUNNER_TEMP/opengrep"
+
+    - name: Activate opengrep on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        chmod +x "$RUNNER_TEMP/opengrep"
         echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
         "$RUNNER_TEMP/opengrep" --version
 
-    - name: Fetch opengrep rules
+    # ----- opengrep-rules (cached on resolved SHA) -------------------------
+    # Resolve the rules ref to a commit SHA so the cache key invalidates
+    # automatically when (e.g.) `main` advances. For tag refs the SHA is
+    # stable so we get permanent cache hits.
+    - name: Resolve opengrep-rules SHA
+      id: rules-sha
+      shell: bash
+      env:
+        RULES_REF: ${{ inputs.opengrep-rules-ref }}
+      run: |
+        set -euo pipefail
+        SHA=$(git ls-remote https://github.com/opengrep/opengrep-rules.git "$RULES_REF" | awk '{print $1}' | head -n1)
+        if [ -z "$SHA" ]; then SHA="$RULES_REF"; fi
+        echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+    - name: Cache opengrep-rules
+      id: rules-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/opengrep-rules
+        key: opengrep-rules-${{ steps.rules-sha.outputs.sha }}
+
+    - name: Fetch opengrep rules (cache miss)
+      if: steps.rules-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         RULES_REF: ${{ inputs.opengrep-rules-ref }}
@@ -215,7 +345,7 @@ runs:
         set -euo pipefail
         git clone --depth 1 --branch "$RULES_REF" \
           https://github.com/opengrep/opengrep-rules.git "$RUNNER_TEMP/opengrep-rules"
-        echo "::notice::opengrep rules at $RUNNER_TEMP/opengrep-rules (ref: $RULES_REF)"
+        echo "::notice::opengrep rules at $RUNNER_TEMP/opengrep-rules (ref: $RULES_REF, sha: ${{ steps.rules-sha.outputs.sha }})"
 
     - name: Run opengrep SAST scan
       shell: bash
