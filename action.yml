@@ -7,8 +7,17 @@ branding:
 
 inputs:
   anthropic-api-key:
-    description: 'Anthropic API key for OpenCode to call Claude with'
-    required: true
+    description: 'Shortcut for Anthropic users — sets ANTHROPIC_API_KEY in OpenCode''s environment. For non-Anthropic providers (z.ai, OpenAI, Google, etc.) use `opencode-env` instead.'
+    required: false
+    default: ''
+  opencode-env:
+    description: 'Multi-line KEY=VALUE pairs exported to OpenCode (e.g. "ZHIPU_API_KEY=..." for z.ai, "OPENAI_API_KEY=..." for OpenAI). Use for any provider besides Anthropic. Values are written to a 0600-mode tmpfile.'
+    required: false
+    default: ''
+  model:
+    description: 'Model id in provider/model form (e.g. "anthropic/claude-sonnet-4-5", "z.ai/glm-4.6"). Empty = OpenCode default.'
+    required: false
+    default: ''
   github-token:
     description: 'Token used to post PR comments and upload SARIF (typically secrets.GITHUB_TOKEN)'
     required: true
@@ -218,15 +227,46 @@ runs:
     - name: Run OpenCode orchestrator
       shell: bash
       env:
-        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic-api-key }}
+        OPENCODE_ENV_RAW: ${{ inputs.opencode-env }}
+        OPENCODE_MODEL: ${{ inputs.model }}
         BASE_REF: ${{ steps.base.outputs.ref }}
       run: |
         set -euo pipefail
+
+        # Auth: at least one of anthropic-api-key / opencode-env must be set.
+        if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENCODE_ENV_RAW" ]; then
+          echo "::error::Provide either `anthropic-api-key` (shortcut for Anthropic) or `opencode-env` (KEY=VALUE pairs for any provider, e.g. ZHIPU_API_KEY for z.ai)."
+          exit 1
+        fi
+
+        # Assemble env vars into a 0600 file so OpenCode's .env loader picks
+        # them up without echoing values into the workflow log.
+        ENVFILE="$RUNNER_TEMP/opencode.env"
+        : > "$ENVFILE"
+        chmod 600 "$ENVFILE"
+        if [ -n "$ANTHROPIC_API_KEY_INPUT" ]; then
+          printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY_INPUT" >> "$ENVFILE"
+        fi
+        if [ -n "$OPENCODE_ENV_RAW" ]; then
+          printf '%s\n' "$OPENCODE_ENV_RAW" >> "$ENVFILE"
+        fi
+
+        # Source the env file into this step's shell so OpenCode inherits it.
+        set -a
+        # shellcheck disable=SC1090
+        . "$ENVFILE"
+        set +a
+
         # The orchestrator agent file (mode: primary) walks OpenCode through
         # the recon → analysis → validation → review phases and dispatches
         # subagents. Findings persist via the zrok CLI; we don't capture the
         # model's stdout for content, only for telemetry.
-        opencode run --agent zrok-orchestrator \
+        MODEL_ARGS=()
+        if [ -n "$OPENCODE_MODEL" ]; then
+          MODEL_ARGS+=(--model "$OPENCODE_MODEL")
+        fi
+        opencode run --agent zrok-orchestrator "${MODEL_ARGS[@]}" \
           "Run a security review of this pull request scoped to the changed files described in your system prompt." \
           | tee "$RUNNER_TEMP/opencode-run.log"
 

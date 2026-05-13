@@ -36,11 +36,31 @@ jobs:
           block-on: critical
 ```
 
+### Using a non-Anthropic provider (e.g. z.ai)
+
+Pass the relevant env vars via `opencode-env` and pin the model via `model`:
+
+```yaml
+- uses: diffsec/zrok-review-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    opencode-env: |
+      ZHIPU_API_KEY=${{ secrets.ZHIPU_API_KEY }}
+    model: z.ai/glm-4.6
+```
+
+OpenCode reads providers from env vars (and `.env` files); the action writes
+your `opencode-env` to a 0600 tmpfile and sources it into the OpenCode
+invocation. The same shape works for OpenAI (`OPENAI_API_KEY=`), Google
+(`GOOGLE_API_KEY=`), Bedrock (`AWS_*` triple), etc.
+
 ## Inputs
 
 | Input | Default | Notes |
 |---|---|---|
-| `anthropic-api-key` | — | **Required.** Used by OpenCode to call Claude. |
+| `anthropic-api-key` | — | Shortcut for Anthropic users (sets `ANTHROPIC_API_KEY`). For other providers, use `opencode-env`. **One of `anthropic-api-key` or `opencode-env` is required.** |
+| `opencode-env` | — | Multi-line `KEY=VALUE` env vars passed to OpenCode. Use for z.ai (`ZHIPU_API_KEY=...`), OpenAI (`OPENAI_API_KEY=...`), Google, Bedrock, etc. Written to a 0600 tmpfile, not logged. |
+| `model` | — | Model id as `provider/model` (e.g. `anthropic/claude-sonnet-4-5`, `z.ai/glm-4.6`). Empty = OpenCode default. |
 | `github-token` | — | **Required.** Usually `secrets.GITHUB_TOKEN`. |
 | `base-ref` | PR target | Override to diff against a specific ref. |
 | `zrok-repo` | `diffsec/zrok` | GitHub repo to clone zrok from. Override for fork testing. |
