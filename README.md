@@ -50,6 +50,10 @@ jobs:
 | `block-on` | `''` (off) | Fail the check if any finding ≥ this severity exists. Set to `critical` or `high`. |
 | `comment-pr` | `true` | Post the rendered comment to the PR. |
 | `upload-sarif` | `true` | Upload SARIF to code-scanning. |
+| `enable-sast` | `true` | Run an opengrep SAST scan before the LLM agents; `sast-triage-agent` filters false positives. |
+| `opengrep-version` | `latest` | Opengrep release tag (used when `enable-sast: true`). |
+| `opengrep-rules-ref` | `main` | git ref of `opengrep/opengrep-rules` to clone. |
+| `opengrep-config` | `security` | Subdirectory of opengrep-rules (e.g. `python`, `security`) or a registry shorthand (e.g. `p/security-audit`). |
 
 ## Outputs
 
@@ -105,15 +109,41 @@ shell commands.
 1. Build zrok at the requested ref, install OpenCode from npm.
 2. `zrok init` + `zrok review pr setup --runner opencode` —
    detects tech stack, classifies project, selects applicable agents,
-   writes `.opencode/agent/<name>.md` for each subagent plus a
+   writes `.opencode/agents/<name>.md` for each subagent plus a
    `zrok-orchestrator` primary agent.
-3. `opencode run --agent zrok-orchestrator` — OpenCode dispatches
-   subagents through the recon → analysis → validation → review phases.
-   Findings persist via the `zrok finding create` CLI.
-4. `zrok review pr report --base $BASE` — filters findings to the diff,
+3. (If `enable-sast: true`) Install opengrep + clone `opengrep-rules`,
+   then `zrok sast --config <rules> --diff $BASE` populates the store
+   with deterministic SAST findings (`created_by: opengrep`,
+   `status: open`).
+4. `opencode run --agent zrok-orchestrator` — OpenCode dispatches
+   subagents through recon → SAST-triage → analysis → validation →
+   review. `sast-triage-agent` filters false positives from the
+   opengrep results before the LLM agents pile on; remaining LLM
+   findings dedup against confirmed SAST findings via fingerprint.
+5. `zrok review pr report --base $BASE` — filters findings to the diff,
    renders the PR comment and SARIF.
-5. Upload SARIF to code-scanning, post comment via `gh api`, enforce
+6. Upload SARIF to code-scanning, post comment via `gh api`, enforce
    `block-on` if configured.
+
+## SAST + LLM split
+
+Deterministic SAST (opengrep) and LLM agents play complementary roles:
+
+- **SAST** is fast, free, and catches well-known vulnerability patterns
+  (SQL string concatenation, weak crypto, hardcoded creds, taint into
+  command exec). High false-positive rate (~70% across benchmarks).
+- **LLM agents** are slower and cost tokens but reason about business
+  logic, multi-step flows, and framework-specific issues SAST rules
+  can't express.
+- **sast-triage-agent** is a validation-phase subagent that triages the
+  opengrep findings before analysis runs. Its job is FP filtering, not
+  original analysis — runners should use a smaller model for it. The
+  remaining LLM agents skip anything already confirmed by SAST
+  (fingerprint dedup), so total spend per PR is typically lower than
+  pure-LLM review at the same coverage.
+
+To skip SAST entirely (pure LLM review), set `enable-sast: false`.
 
 [zrok]: https://github.com/diffsec/zrok
 [OpenCode]: https://opencode.ai
+[opengrep]: https://github.com/opengrep/opengrep
