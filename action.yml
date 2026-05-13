@@ -16,8 +16,12 @@ inputs:
     description: 'Git ref to diff against. Defaults to the PR target branch (origin/$GITHUB_BASE_REF).'
     required: false
     default: ''
+  zrok-repo:
+    description: 'GitHub repo (owner/name) to clone zrok from. Override for testing fork branches; defaults to the canonical repo.'
+    required: false
+    default: 'diffsec/zrok'
   zrok-ref:
-    description: 'Git ref of github.com/diffsec/zrok to build from'
+    description: 'Git ref (branch or tag) within zrok-repo to build from. SHAs not supported by git clone --branch.'
     required: false
     default: 'main'
   opencode-version:
@@ -92,6 +96,7 @@ runs:
     - name: Install zrok
       shell: bash
       env:
+        ZROK_REPO: ${{ inputs.zrok-repo }}
         ZROK_REF: ${{ inputs.zrok-ref }}
       run: |
         set -euo pipefail
@@ -99,7 +104,7 @@ runs:
         mkdir -p "$GOBIN"
         # Build zrok from source at the requested ref. Once releases exist
         # this step can switch to a binary download.
-        git clone --depth 1 --branch "$ZROK_REF" https://github.com/diffsec/zrok.git "$RUNNER_TEMP/zrok-src"
+        git clone --depth 1 --branch "$ZROK_REF" "https://github.com/${ZROK_REPO}.git" "$RUNNER_TEMP/zrok-src"
         cd "$RUNNER_TEMP/zrok-src"
         go build -o "$GOBIN/zrok" .
         echo "$GOBIN" >> "$GITHUB_PATH"

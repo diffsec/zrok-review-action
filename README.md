@@ -43,7 +43,8 @@ jobs:
 | `anthropic-api-key` | — | **Required.** Used by OpenCode to call Claude. |
 | `github-token` | — | **Required.** Usually `secrets.GITHUB_TOKEN`. |
 | `base-ref` | PR target | Override to diff against a specific ref. |
-| `zrok-ref` | `main` | Pin zrok to a specific git ref. |
+| `zrok-repo` | `diffsec/zrok` | GitHub repo to clone zrok from. Override for fork testing. |
+| `zrok-ref` | `main` | Git ref (branch or tag) within `zrok-repo`. |
 | `opencode-version` | `latest` | npm version of `opencode-ai`. |
 | `top-n` | `10` | Max findings inlined in the PR comment. Full list still goes to SARIF. |
 | `severity-threshold` | `high` | Inline only findings at or above this severity in the PR comment. |
