@@ -24,12 +24,8 @@ inputs:
     description: 'opencode-ai npm package version'
     required: false
     default: 'latest'
-  enable-sast:
-    description: 'Run an opengrep SAST scan and let sast-triage-agent triage results before LLM analysis'
-    required: false
-    default: 'true'
   opengrep-version:
-    description: 'opengrep release tag to install (e.g. v1.0.0)'
+    description: 'opengrep release tag to install (e.g. v1.21.0). Use "latest" for the newest release.'
     required: false
     default: 'latest'
   opengrep-rules-ref:
@@ -148,27 +144,32 @@ runs:
         echo "::notice::zrok review scope — $CHANGED changed file(s), $SUGGESTED applicable agent(s)"
 
     - name: Install opengrep
-      if: ${{ inputs.enable-sast == 'true' }}
       shell: bash
       env:
         OPENGREP_VERSION: ${{ inputs.opengrep-version }}
       run: |
         set -euo pipefail
         # Opengrep ships self-contained binaries via Nuitka — no OCaml/Python
-        # runtime needed. We pin the version via the action input.
-        case "${RUNNER_OS}" in
-          Linux)  ASSET="opengrep-core_manylinux_x86" ;;
-          macOS)  ASSET="opengrep-core_osx_arm64" ;;
-          *)      echo "::error::unsupported RUNNER_OS=${RUNNER_OS} for opengrep"; exit 1 ;;
+        # runtime needed. Asset naming: opengrep_<libc>_<arch>, no extension,
+        # straight executable.
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   ASSET="opengrep_manylinux_x86" ;;
+          Linux-ARM64) ASSET="opengrep_manylinux_aarch64" ;;
+          macOS-ARM64) ASSET="opengrep_osx_arm64" ;;
+          macOS-X64)   ASSET="opengrep_osx_x86" ;;
+          *) echo "::error::unsupported runner ${RUNNER_OS}-${RUNNER_ARCH} for opengrep"; exit 1 ;;
         esac
-        URL="https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/${ASSET}"
+        if [ "$OPENGREP_VERSION" = "latest" ]; then
+          URL="https://github.com/opengrep/opengrep/releases/latest/download/${ASSET}"
+        else
+          URL="https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/${ASSET}"
+        fi
         curl -fsSL "$URL" -o "$RUNNER_TEMP/opengrep"
         chmod +x "$RUNNER_TEMP/opengrep"
         echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
         "$RUNNER_TEMP/opengrep" --version
 
     - name: Fetch opengrep rules
-      if: ${{ inputs.enable-sast == 'true' }}
       shell: bash
       env:
         RULES_REF: ${{ inputs.opengrep-rules-ref }}
@@ -179,7 +180,6 @@ runs:
         echo "::notice::opengrep rules at $RUNNER_TEMP/opengrep-rules (ref: $RULES_REF)"
 
     - name: Run opengrep SAST scan
-      if: ${{ inputs.enable-sast == 'true' }}
       shell: bash
       env:
         BASE_REF: ${{ steps.base.outputs.ref }}

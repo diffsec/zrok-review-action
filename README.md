@@ -50,8 +50,7 @@ jobs:
 | `block-on` | `''` (off) | Fail the check if any finding ≥ this severity exists. Set to `critical` or `high`. |
 | `comment-pr` | `true` | Post the rendered comment to the PR. |
 | `upload-sarif` | `true` | Upload SARIF to code-scanning. |
-| `enable-sast` | `true` | Run an opengrep SAST scan before the LLM agents; `sast-triage-agent` filters false positives. |
-| `opengrep-version` | `latest` | Opengrep release tag (used when `enable-sast: true`). |
+| `opengrep-version` | `latest` | Opengrep release tag. The opengrep scan runs unconditionally before the LLM agents. |
 | `opengrep-rules-ref` | `main` | git ref of `opengrep/opengrep-rules` to clone. |
 | `opengrep-config` | `security` | Subdirectory of opengrep-rules (e.g. `python`, `security`) or a registry shorthand (e.g. `p/security-audit`). |
 
@@ -141,8 +140,6 @@ Deterministic SAST (opengrep) and LLM agents play complementary roles:
   remaining LLM agents skip anything already confirmed by SAST
   (fingerprint dedup), so total spend per PR is typically lower than
   pure-LLM review at the same coverage.
-
-To skip SAST entirely (pure LLM review), set `enable-sast: false`.
 
 [zrok]: https://github.com/diffsec/zrok
 [OpenCode]: https://opencode.ai
