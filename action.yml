@@ -36,6 +36,14 @@ inputs:
     description: 'opengrep --config arg: either a subdirectory of opengrep-rules (e.g. python, security) or a registry shorthand (e.g. p/security-audit)'
     required: false
     default: 'security'
+  allow-agent-rules:
+    description: 'Permit the orchestrator to author new opengrep rules via `zrok rule add` (v1.1 feature). Default false. New rules apply to NEXT PR, not this one.'
+    required: false
+    default: 'false'
+  allow-agent-exceptions:
+    description: 'Permit the orchestrator to author finding suppressions via `zrok exception add` (v1.1 feature). Default false. Suppressions are time-bounded (expires required).'
+    required: false
+    default: 'false'
   top-n:
     description: 'Maximum findings to inline in the PR comment (full list goes to SARIF)'
     required: false
@@ -131,12 +139,19 @@ runs:
       shell: bash
       env:
         BASE_REF: ${{ steps.base.outputs.ref }}
+        ALLOW_RULES: ${{ inputs.allow-agent-rules }}
+        ALLOW_EXCEPTIONS: ${{ inputs.allow-agent-exceptions }}
       run: |
         set -euo pipefail
         zrok init
         # --runner opencode emits .opencode/agents/<name>.md (subagents) and
         # zrok-orchestrator.md (primary). Suggested-agents list goes to JSON.
-        zrok review pr setup --base "$BASE_REF" --runner opencode --json > "$RUNNER_TEMP/setup.json"
+        # v1.1 toggles propagate as CLI flags so the orchestrator prompt
+        # conditionally includes the rule / exception authoring sections.
+        EXTRA=()
+        if [ "$ALLOW_RULES" = "true" ];      then EXTRA+=(--allow-agent-rules); fi
+        if [ "$ALLOW_EXCEPTIONS" = "true" ]; then EXTRA+=(--allow-agent-exceptions); fi
+        zrok review pr setup --base "$BASE_REF" --runner opencode --json "${EXTRA[@]}" > "$RUNNER_TEMP/setup.json"
         SUGGESTED=$(jq -r '.suggested_agents | length' "$RUNNER_TEMP/setup.json")
         CHANGED=$(jq -r '.changed_files | length' "$RUNNER_TEMP/setup.json")
         echo "suggested-count=$SUGGESTED" >> "$GITHUB_OUTPUT"

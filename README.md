@@ -53,6 +53,8 @@ jobs:
 | `opengrep-version` | `latest` | Opengrep release tag. The opengrep scan runs unconditionally before the LLM agents. |
 | `opengrep-rules-ref` | `main` | git ref of `opengrep/opengrep-rules` to clone. |
 | `opengrep-config` | `security` | Subdirectory of opengrep-rules (e.g. `python`, `security`) or a registry shorthand (e.g. `p/security-audit`). |
+| `allow-agent-rules` | `false` | (v1.1) Permit the orchestrator to author new opengrep rules via `zrok rule add`. New rules apply to the **next** PR. |
+| `allow-agent-exceptions` | `false` | (v1.1) Permit the orchestrator to author finding suppressions via `zrok exception add`. Mandatory `expires` keeps suppressions from accumulating silently. |
 
 ## Outputs
 
