@@ -392,6 +392,18 @@ runs:
           printf '%s\n' "$OPENCODE_ENV_RAW" >> "$ENVFILE"
         fi
 
+        # Fail fast on empty-value env entries (e.g. "FOO=" with nothing
+        # after the `=`). This happens silently when a referenced secret
+        # doesn't resolve — opencode auth-fails and the orchestrator exits
+        # in seconds, leaving an empty review with no obvious cause in
+        # the log. Surface the broken keys explicitly.
+        EMPTY_KEYS=$(awk -F= 'NF==2 && $2=="" {print $1}' "$ENVFILE" | grep -E '^[A-Z_][A-Z0-9_]*$' || true)
+        if [ -n "$EMPTY_KEYS" ]; then
+          echo "::error::opencode-env contains entries with empty values: $(echo "$EMPTY_KEYS" | tr '\n' ' ')"
+          echo "::error::This usually means a secret reference didn't resolve (wrong name, wrong scope, or not yet set on the repo). Verify the secret exists at Settings → Secrets and variables → Actions on the repo running this workflow."
+          exit 1
+        fi
+
         # If a custom opencode.json was provided, materialize it at the
         # repo root. OpenCode reads opencode.json from the working dir, so
         # writing it here lets users plug in providers without committing
