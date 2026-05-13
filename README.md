@@ -143,6 +143,23 @@ Deterministic SAST (opengrep) and LLM agents play complementary roles:
   (fingerprint dedup), so total spend per PR is typically lower than
   pure-LLM review at the same coverage.
 
+## Periodic rule-noise audit (v1.1+)
+
+If you've enabled `allow-agent-rules: true` and the orchestrator has been
+authoring rules into `.zrok/rules/`, schedule an audit so the rule set
+doesn't quietly rot into noise.
+
+A ready-made workflow lives in this repo at
+[`templates/zrok-rule-audit.yml`](./templates/zrok-rule-audit.yml). Copy it
+into your project at `.github/workflows/zrok-rule-audit.yml` and set
+`ANTHROPIC_API_KEY` (adjust the cron schedule if Monday 09:00 UTC doesn't
+suit you).
+
+The workflow runs `rule-judge-agent` on a schedule and opens a PR
+(`zrok rule audit: <date>`) when verdicts change. Retired rules are marked
+`disabled: true` on their metadata; `zrok sast` skips them but the rule
+files stay on disk for archaeology.
+
 [zrok]: https://github.com/diffsec/zrok
 [OpenCode]: https://opencode.ai
 [opengrep]: https://github.com/opengrep/opengrep

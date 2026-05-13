@@ -1,0 +1,139 @@
+# Periodic rule-noise audit for projects that use zrok with agent-authored
+# rules enabled (v1.1+). The rule-judge-agent evaluates every rule in
+# .zrok/rules/ and assigns a verdict — keep, refine, retire, or escalate —
+# based on pattern breadth, codebase currency, and trigger/FP ratios where
+# available. Verdicts land on the rule's metadata sidecar; if anything
+# changes, this workflow opens a PR with the new annotations.
+#
+# Copy this file to .github/workflows/zrok-rule-audit.yml in the consumer
+# repo, set the secrets, and adjust the cron schedule to taste.
+
+name: zrok rule audit
+on:
+  schedule:
+    - cron: "0 9 * * 1"        # Mondays 09:00 UTC
+  workflow_dispatch:           # manual trigger from the Actions tab
+
+permissions:
+  contents: write              # commit verdict changes to a new branch
+  pull-requests: write         # open the audit PR
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      AUDIT_BRANCH: zrok/rule-audit-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # need full history for the audit base ref
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install zrok
+        shell: bash
+        env:
+          ZROK_REF: main         # pin to a tag for stability in production
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/zrok-bin"
+          mkdir -p "$GOBIN"
+          git clone --depth 1 --branch "$ZROK_REF" https://github.com/diffsec/zrok.git "$RUNNER_TEMP/zrok-src"
+          ( cd "$RUNNER_TEMP/zrok-src" && go build -o "$GOBIN/zrok" . )
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          "$GOBIN/zrok" --version
+
+      - name: Install OpenCode
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g opencode-ai@latest
+          opencode --version
+
+      - name: Skip if no project-local rules exist
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d .zrok/rules ] || ! ls .zrok/rules/*.yaml >/dev/null 2>&1; then
+            echo "No .zrok/rules/*.yaml — nothing to audit."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Materialize rule-judge-agent
+        if: steps.probe.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          zrok init || true
+          # We use review pr setup as a vehicle to materialize the agent
+          # files into .opencode/agents/. --base is arbitrary here — the
+          # judge doesn't care about the diff, it reads the rules store.
+          zrok review pr setup \
+            --base "$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)" \
+            --runner opencode \
+            --include-agent rule-judge-agent >/dev/null
+
+      - name: Run rule-judge-agent
+        if: steps.probe.outputs.skip != 'true'
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          opencode run --agent rule-judge-agent \
+            "Audit all accumulated project-local rules. For each rule, gather evidence (pattern breadth, codebase currency, trigger/FP ratio from \`zrok rule audit --json\`) and apply a verdict via \`zrok rule annotate\`. Bias toward keep when uncertain." \
+            | tee "$RUNNER_TEMP/judge-run.log"
+
+      - name: Detect verdict changes
+        if: steps.probe.outputs.skip != 'true'
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          # zmeta sidecars are what carry the verdict. If none changed,
+          # nothing to PR.
+          if git diff --quiet -- '.zrok/rules/*.zmeta.yaml'; then
+            echo "No verdict changes — exiting cleanly."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open verdict PR
+        if: steps.diff.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name  "zrok-rule-audit[bot]"
+          git config user.email "zrok-rule-audit@users.noreply.github.com"
+          git checkout -b "$AUDIT_BRANCH"
+          git add '.zrok/rules/*.zmeta.yaml'
+          git commit -m "zrok rule audit ($(date -u +%Y-%m-%d))"
+          git push origin "$AUDIT_BRANCH"
+          gh pr create \
+            --title "zrok rule audit: $(date -u +%Y-%m-%d)" \
+            --body "$(cat <<'EOF'
+          Weekly rule-noise audit by the zrok rule-judge-agent.
+
+          Each rule's metadata sidecar (`.zrok/rules/*.zmeta.yaml`) has been
+          re-evaluated. Review the verdict + verdict_note fields per rule:
+
+          - **keep**: rule still looks healthy.
+          - **refine**: high FP ratio or over-broad pattern; consider tightening.
+          - **retire**: marked `disabled: true` — `zrok sast` will skip it.
+          - **escalate**: needs human judgment.
+
+          Merge to apply, or close to discard the audit's verdicts (rules return to their prior state).
+          EOF
+          )"
