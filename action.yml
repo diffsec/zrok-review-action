@@ -11,11 +11,15 @@ inputs:
     required: false
     default: ''
   opencode-env:
-    description: 'Multi-line KEY=VALUE pairs exported to OpenCode (e.g. "ZHIPU_API_KEY=..." for z.ai, "OPENAI_API_KEY=..." for OpenAI). Use for any provider besides Anthropic. Values are written to a 0600-mode tmpfile.'
+    description: 'Multi-line KEY=VALUE pairs exported to OpenCode (e.g. "ZAI_API_KEY=..." for z.ai). Use for any provider besides Anthropic. Values are written to a 0600-mode tmpfile.'
+    required: false
+    default: ''
+  opencode-config:
+    description: 'Full opencode.json content — provider definitions and model aliases. Written to the repo root before invoking OpenCode. Use this to plug in custom providers like the Z.AI Coding Plan endpoint without writing opencode.json into your codebase.'
     required: false
     default: ''
   model:
-    description: 'Model id in provider/model form (e.g. "anthropic/claude-sonnet-4-5", "z.ai/glm-4.6"). Empty = OpenCode default.'
+    description: 'Model id in provider/model form (e.g. "anthropic/claude-sonnet-4-5", "zai/glm-5.1"). Empty = OpenCode default.'
     required: false
     default: ''
   github-token:
@@ -229,6 +233,7 @@ runs:
       env:
         ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic-api-key }}
         OPENCODE_ENV_RAW: ${{ inputs.opencode-env }}
+        OPENCODE_CONFIG_RAW: ${{ inputs.opencode-config }}
         OPENCODE_MODEL: ${{ inputs.model }}
         BASE_REF: ${{ steps.base.outputs.ref }}
       run: |
@@ -236,7 +241,7 @@ runs:
 
         # Auth: at least one of anthropic-api-key / opencode-env must be set.
         if [ -z "$ANTHROPIC_API_KEY_INPUT" ] && [ -z "$OPENCODE_ENV_RAW" ]; then
-          echo "::error::Provide either `anthropic-api-key` (shortcut for Anthropic) or `opencode-env` (KEY=VALUE pairs for any provider, e.g. ZHIPU_API_KEY for z.ai)."
+          echo "::error::Provide either `anthropic-api-key` (shortcut for Anthropic) or `opencode-env` (KEY=VALUE pairs, e.g. ZAI_API_KEY for z.ai). For non-Anthropic providers you'll typically also want `opencode-config` to define the provider endpoint."
           exit 1
         fi
 
@@ -250,6 +255,15 @@ runs:
         fi
         if [ -n "$OPENCODE_ENV_RAW" ]; then
           printf '%s\n' "$OPENCODE_ENV_RAW" >> "$ENVFILE"
+        fi
+
+        # If a custom opencode.json was provided, materialize it at the
+        # repo root. OpenCode reads opencode.json from the working dir, so
+        # writing it here lets users plug in providers without committing
+        # the config (or their API key references) into the repo.
+        if [ -n "$OPENCODE_CONFIG_RAW" ]; then
+          printf '%s' "$OPENCODE_CONFIG_RAW" > "$GITHUB_WORKSPACE/opencode.json"
+          echo "::notice::Wrote custom opencode.json (provider config) to repo root for this run."
         fi
 
         # Source the env file into this step's shell so OpenCode inherits it.

@@ -36,23 +36,45 @@ jobs:
           block-on: critical
 ```
 
-### Using a non-Anthropic provider (e.g. z.ai)
+### Using the Z.AI Coding Plan (GLM-5.1, GLM-4.7, GLM-5-Turbo)
 
-Pass the relevant env vars via `opencode-env` and pin the model via `model`:
+The Coding Plan uses a different endpoint than standard z.ai. The cleanest
+recipe defines a custom provider via `opencode-config` (so you don't have
+to commit `opencode.json` into your repo) and supplies the API key via
+`opencode-env`:
 
 ```yaml
 - uses: diffsec/zrok-review-action@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     opencode-env: |
-      ZHIPU_API_KEY=${{ secrets.ZHIPU_API_KEY }}
-    model: z.ai/glm-4.6
+      ZAI_API_KEY=${{ secrets.ZAI_API_KEY }}
+    opencode-config: |
+      {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+          "zai": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Z.AI Coding Plan",
+            "options": {
+              "baseURL": "https://api.z.ai/api/coding/paas/v4",
+              "apiKey": "{env:ZAI_API_KEY}"
+            },
+            "models": {
+              "glm-5.1": { "name": "GLM-5.1" },
+              "glm-5-turbo": { "name": "GLM-5-Turbo" },
+              "glm-4.7": { "name": "GLM-4.7" }
+            }
+          }
+        }
+      }
+    model: zai/glm-5.1
 ```
 
-OpenCode reads providers from env vars (and `.env` files); the action writes
-your `opencode-env` to a 0600 tmpfile and sources it into the OpenCode
-invocation. The same shape works for OpenAI (`OPENAI_API_KEY=`), Google
-(`GOOGLE_API_KEY=`), Bedrock (`AWS_*` triple), etc.
+For other providers (OpenAI, Google, Bedrock, etc.) drop the
+`opencode-config` block — most have an env-var shortcut OpenCode picks
+up automatically. The `opencode-env` shape stays the same; just substitute
+the right key (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AWS_*` triple, ...).
 
 ## Inputs
 
