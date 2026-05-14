@@ -1,9 +1,9 @@
-# zrok security review action
+# quokka security review action
 
-Multi-agent security code review on pull requests, driven by [zrok] and [OpenCode].
+Multi-agent security code review on pull requests, driven by [quokka] and [OpenCode].
 
 Unlike single-LLM-call security review actions, this one runs **N specialized
-agents per PR** — chosen by zrok based on your project's detected stack
+agents per PR** — chosen by quokka based on your project's detected stack
 (injection, SSRF, validation, config, dependencies, …). Findings are stable
 across runs (sha256 fingerprints in SARIF `partialFingerprints`) so the same
 issue stops re-reporting on every commit.
@@ -11,7 +11,7 @@ issue stops re-reporting on every commit.
 ## Usage
 
 ```yaml
-name: zrok security review
+name: quokka security review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0      # action needs base ref for diff
-      - uses: diffsec/zrok-review-action@v1
+      - uses: diffsec/quokka-review-action@v1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -44,7 +44,7 @@ to commit `opencode.json` into your repo) and supplies the API key via
 `opencode-env`:
 
 ```yaml
-- uses: diffsec/zrok-review-action@v1
+- uses: diffsec/quokka-review-action@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     opencode-env: |
@@ -82,13 +82,13 @@ The action supports two execution paths via `runner-mode`. Both run the
 same subagents over the same diff and produce the same finding store —
 they differ only in **who decides which subagent runs when**.
 
-- **`orchestrator` (default).** A primary `zrok-orchestrator` agent runs
+- **`orchestrator` (default).** A primary `quokka-orchestrator` agent runs
   inside OpenCode and decides which subagents to dispatch and in what order.
   Adaptive, handles project quirks well, but only as reliable as the model's
   multi-step tool-use. Recommended with Claude Sonnet/Opus, GPT-4 class,
   DeepSeek V4 Pro.
-- **`dispatcher`.** A deterministic Go dispatcher in `zrok` reads a
-  `DispatchPlan` emitted by `zrok review pr setup` and spawns each subagent
+- **`dispatcher`.** A deterministic Go dispatcher in `quokka` reads a
+  `DispatchPlan` emitted by `quokka review pr setup` and spawns each subagent
   in parallel via `opencode run`. The LLM's only job is to review code and
   file findings — no orchestration. Predictable, model-agnostic, and runs
   reliably with smaller / cheaper models (Qwen Coder, GLM-4.6, DeepSeek
@@ -97,7 +97,7 @@ they differ only in **who decides which subagent runs when**.
 Premium recipe — strong model, orchestrator mode:
 
 ```yaml
-- uses: diffsec/zrok-review-action@v1
+- uses: diffsec/quokka-review-action@v1
   with:
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
     github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -110,7 +110,7 @@ Premium recipe — strong model, orchestrator mode:
 Cost-constrained recipe — cheaper model, dispatcher mode:
 
 ```yaml
-- uses: diffsec/zrok-review-action@v1
+- uses: diffsec/quokka-review-action@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     opencode-env: |
@@ -134,8 +134,8 @@ visible contract.
 | `model` | — | Model id as `provider/model` (e.g. `anthropic/claude-sonnet-4-5`, `z.ai/glm-4.6`). Empty = OpenCode default. |
 | `github-token` | — | **Required.** Usually `secrets.GITHUB_TOKEN`. |
 | `base-ref` | PR target | Override to diff against a specific ref. |
-| `zrok-repo` | `diffsec/zrok` | GitHub repo to clone zrok from. Override for fork testing. |
-| `zrok-ref` | `main` | Git ref (branch or tag) within `zrok-repo`. |
+| `quokka-repo` | `diffsec/quokka` | GitHub repo to clone quokka from. Override for fork testing. |
+| `quokka-ref` | `main` | Git ref (branch or tag) within `quokka-repo`. |
 | `opencode-version` | `latest` | npm version of `opencode-ai`. |
 | `top-n` | `10` | Max findings inlined in the PR comment. Full list still goes to SARIF. |
 | `severity-threshold` | `high` | Inline only findings at or above this severity in the PR comment. |
@@ -146,16 +146,16 @@ visible contract.
 | `opengrep-rules-ref` | `main` | git ref of `opengrep/opengrep-rules` to clone. |
 | `opengrep-config` | `security` | Subdirectory of opengrep-rules (e.g. `python`, `security`) or a registry shorthand (e.g. `p/security-audit`). |
 | `profile` | `fast` | Orchestrator profile. `fast` = SAST triage + parallel analysis only (~3-5 min, advisory). `deep` = adds recon, validation, per-critical-finding review (~20-30 min, thorough). |
-| `runner-mode` | `orchestrator` | `orchestrator` uses an LLM-orchestrator agent to dispatch subagents (best with strong models). `dispatcher` uses zrok's deterministic Go dispatcher — model-agnostic, parallel, substantially cheaper for smaller models that struggle with multi-step tool orchestration. |
-| `allow-agent-rules` | `false` | (v1.1) Permit the orchestrator to author new opengrep rules via `zrok rule add`. New rules apply to the **next** PR. |
-| `allow-agent-exceptions` | `false` | (v1.1) Permit the orchestrator to author finding suppressions via `zrok exception add`. Mandatory `expires` keeps suppressions from accumulating silently. |
+| `runner-mode` | `orchestrator` | `orchestrator` uses an LLM-orchestrator agent to dispatch subagents (best with strong models). `dispatcher` uses quokka's deterministic Go dispatcher — model-agnostic, parallel, substantially cheaper for smaller models that struggle with multi-step tool orchestration. |
+| `allow-agent-rules` | `false` | (v1.1) Permit the orchestrator to author new opengrep rules via `quokka rule add`. New rules apply to the **next** PR. |
+| `allow-agent-exceptions` | `false` | (v1.1) Permit the orchestrator to author finding suppressions via `quokka exception add`. Mandatory `expires` keeps suppressions from accumulating silently. |
 
 ## Outputs
 
 | Output | Description |
 |---|---|
 | `findings-count` | Total findings scoped to the diff. |
-| `sarif-path` | Path to the generated SARIF (uploaded as `zrok-review` artifact). |
+| `sarif-path` | Path to the generated SARIF (uploaded as `quokka-review` artifact). |
 | `comment-path` | Path to the generated PR comment markdown. |
 
 ## What gets posted
@@ -169,7 +169,7 @@ A single PR conversation comment with:
 - **Link to code-scanning** for the full list.
 
 The same findings also land in GitHub's code-scanning UI via SARIF upload,
-with `partialFingerprints["zrokFingerprint/v1"]` so that **the same issue
+with `partialFingerprints["quokkaFingerprint/v1"]` so that **the same issue
 will not re-flag on subsequent PRs** as long as the CWE, file, function,
 and normalized title are unchanged.
 
@@ -191,7 +191,7 @@ or scope `base-ref` to limit the diff.
 The action's OpenCode agents are configured to:
 
 - **Deny** `edit`, `write`, `webfetch`.
-- **Allow** `zrok *`, `git diff/log/show`, `rg`, `grep`, `find`, `ls`, `cat`,
+- **Allow** `quokka *`, `git diff/log/show`, `rg`, `grep`, `find`, `ls`, `cat`,
   `head`, `tail`, `wc`. Other bash commands fall through to OpenCode's
   default `ask` (which auto-denies in headless mode).
 
@@ -201,28 +201,28 @@ shell commands.
 
 ## How it works
 
-1. Build zrok at the requested ref, install OpenCode from npm.
-2. `zrok init` + `zrok review pr setup --runner opencode` —
+1. Build quokka at the requested ref, install OpenCode from npm.
+2. `quokka init` + `quokka review pr setup --runner opencode` —
    detects tech stack, classifies project, selects applicable agents,
    writes `.opencode/agents/<name>.md` for each subagent plus a
-   `zrok-orchestrator` primary agent.
+   `quokka-orchestrator` primary agent.
 3. (If `enable-sast: true`) Install opengrep + clone `opengrep-rules`,
-   then `zrok sast --config <rules> --diff $BASE` populates the store
+   then `quokka sast --config <rules> --diff $BASE` populates the store
    with deterministic SAST findings (`created_by: opengrep`,
    `status: open`).
 4. Run the subagents — one of two paths, selected by `runner-mode`:
-   - **orchestrator** (default): `opencode run --agent zrok-orchestrator`.
+   - **orchestrator** (default): `opencode run --agent quokka-orchestrator`.
      OpenCode dispatches subagents through recon → SAST-triage → analysis
      → validation → review.
-   - **dispatcher**: `zrok review pr run --runner opencode`. zrok's
+   - **dispatcher**: `quokka review pr run --runner opencode`. quokka's
      deterministic dispatcher reads the plan persisted at
-     `.zrok/review/setup.json` and spawns each subagent in parallel via
+     `.quokka/review/setup.json` and spawns each subagent in parallel via
      `opencode run`.
 
    Either way, `sast-triage-agent` filters false positives from the
    opengrep results before the LLM analysis agents pile on; remaining
    LLM findings dedup against confirmed SAST findings via fingerprint.
-5. `zrok review pr report --base $BASE` — filters findings to the diff,
+5. `quokka review pr report --base $BASE` — filters findings to the diff,
    renders the PR comment and SARIF.
 6. Upload SARIF to code-scanning, post comment via `gh api`, enforce
    `block-on` if configured.
@@ -247,20 +247,20 @@ Deterministic SAST (opengrep) and LLM agents play complementary roles:
 ## Periodic rule-noise audit (v1.1+)
 
 If you've enabled `allow-agent-rules: true` and the orchestrator has been
-authoring rules into `.zrok/rules/`, schedule an audit so the rule set
+authoring rules into `.quokka/rules/`, schedule an audit so the rule set
 doesn't quietly rot into noise.
 
 A ready-made workflow lives in this repo at
-[`templates/zrok-rule-audit.yml`](./templates/zrok-rule-audit.yml). Copy it
-into your project at `.github/workflows/zrok-rule-audit.yml` and set
+[`templates/quokka-rule-audit.yml`](./templates/quokka-rule-audit.yml). Copy it
+into your project at `.github/workflows/quokka-rule-audit.yml` and set
 `ANTHROPIC_API_KEY` (adjust the cron schedule if Monday 09:00 UTC doesn't
 suit you).
 
 The workflow runs `rule-judge-agent` on a schedule and opens a PR
-(`zrok rule audit: <date>`) when verdicts change. Retired rules are marked
-`disabled: true` on their metadata; `zrok sast` skips them but the rule
+(`quokka rule audit: <date>`) when verdicts change. Retired rules are marked
+`disabled: true` on their metadata; `quokka sast` skips them but the rule
 files stay on disk for archaeology.
 
-[zrok]: https://github.com/diffsec/zrok
+[quokka]: https://github.com/diffsec/quokka
 [OpenCode]: https://opencode.ai
 [opengrep]: https://github.com/opengrep/opengrep
