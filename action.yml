@@ -57,6 +57,15 @@ inputs:
     description: 'Orchestrator profile: "deep" (recon + analysis + validation + per-finding review, ~20-30min) or "fast" (SAST triage + parallel analysis only, ~3-5min). Default fast for CI advisory.'
     required: false
     default: 'fast'
+  runner-mode:
+    description: |
+      'orchestrator' (default) uses an LLM-orchestrator agent that decides which
+      subagents to dispatch. Works well with strong models (Claude Sonnet/Opus,
+      DeepSeek V4 Pro). 'dispatcher' uses zrok's deterministic dispatcher to
+      spawn subagents in parallel — predictable, model-agnostic, and substantially
+      cheaper for smaller models that struggle with multi-step tool orchestration.
+    required: false
+    default: 'orchestrator'
   allow-agent-rules:
     description: 'Permit the orchestrator to author new opengrep rules via `zrok rule add` (v1.1 feature). Default false. New rules apply to NEXT PR, not this one.'
     required: false
@@ -363,14 +372,18 @@ runs:
         fi
         zrok sast --config "$CFG" --diff "$BASE_REF" --json | tee "$RUNNER_TEMP/sast.json"
 
-    - name: Run OpenCode orchestrator
+    # ----- OpenCode environment prep --------------------------------------
+    # Auth validation, env-file assembly, and optional opencode.json
+    # materialization happen once here so both runner modes (orchestrator
+    # and dispatcher) consume the same prepped state. The two mode-specific
+    # steps below source `$RUNNER_TEMP/opencode.env` before invoking their
+    # respective entry point.
+    - name: Prepare OpenCode environment
       shell: bash
       env:
         ANTHROPIC_API_KEY_INPUT: ${{ inputs.anthropic-api-key }}
         OPENCODE_ENV_RAW: ${{ inputs.opencode-env }}
         OPENCODE_CONFIG_RAW: ${{ inputs.opencode-config }}
-        OPENCODE_MODEL: ${{ inputs.model }}
-        BASE_REF: ${{ steps.base.outputs.ref }}
       run: |
         set -euo pipefail
 
@@ -407,22 +420,33 @@ runs:
         # If a custom opencode.json was provided, materialize it at the
         # repo root. OpenCode reads opencode.json from the working dir, so
         # writing it here lets users plug in providers without committing
-        # the config (or their API key references) into the repo.
+        # the config (or their API key references) into the repo. Dispatcher
+        # mode still spawns `opencode run` subprocesses via `zrok review pr
+        # run`, so it needs this file in cwd too.
         if [ -n "$OPENCODE_CONFIG_RAW" ]; then
           printf '%s' "$OPENCODE_CONFIG_RAW" > "$GITHUB_WORKSPACE/opencode.json"
           echo "::notice::Wrote custom opencode.json (provider config) to repo root for this run."
         fi
 
-        # Source the env file into this step's shell so OpenCode inherits it.
+    # ----- runner-mode: orchestrator --------------------------------------
+    # LLM-orchestrated path. The zrok-orchestrator primary agent walks
+    # OpenCode through recon → analysis → validation → review phases and
+    # dispatches subagents itself. Strong models (Claude Sonnet/Opus,
+    # DeepSeek V4 Pro) handle the dispatch decisions well.
+    - name: Run OpenCode orchestrator
+      if: inputs.runner-mode == 'orchestrator'
+      shell: bash
+      env:
+        OPENCODE_MODEL: ${{ inputs.model }}
+      run: |
+        set -euo pipefail
+
+        # Source the prepped env file so OpenCode inherits provider creds.
         set -a
         # shellcheck disable=SC1090
-        . "$ENVFILE"
+        . "$RUNNER_TEMP/opencode.env"
         set +a
 
-        # The orchestrator agent file (mode: primary) walks OpenCode through
-        # the recon → analysis → validation → review phases and dispatches
-        # subagents. Findings persist via the zrok CLI; we don't capture the
-        # model's stdout for content, only for telemetry.
         MODEL_ARGS=()
         if [ -n "$OPENCODE_MODEL" ]; then
           MODEL_ARGS+=(--model "$OPENCODE_MODEL")
@@ -430,6 +454,36 @@ runs:
         opencode run --agent zrok-orchestrator "${MODEL_ARGS[@]}" \
           "Run a security review of this pull request scoped to the changed files described in your system prompt." \
           | tee "$RUNNER_TEMP/opencode-run.log"
+
+    # ----- runner-mode: dispatcher ----------------------------------------
+    # Deterministic Go dispatcher reads the DispatchPlan persisted by
+    # `pr setup` at .zrok/review/setup.json and shells out to each subagent
+    # in parallel. The LLM only reviews code; no dispatch decisions. Cheaper
+    # models (Qwen Coder, GLM-4.6, DeepSeek V4 Flash) survive this path even
+    # when they fail at LLM-orchestration.
+    - name: Run zrok dispatcher
+      if: inputs.runner-mode == 'dispatcher'
+      shell: bash
+      env:
+        OPENCODE_MODEL: ${{ inputs.model }}
+      run: |
+        set -euo pipefail
+
+        # Source the prepped env file so the opencode subprocesses the
+        # dispatcher spawns inherit provider creds.
+        set -a
+        # shellcheck disable=SC1090
+        . "$RUNNER_TEMP/opencode.env"
+        set +a
+
+        MODEL_ARGS=()
+        if [ -n "$OPENCODE_MODEL" ]; then
+          MODEL_ARGS+=(--model "$OPENCODE_MODEL")
+        fi
+        # --setup-json defaults to .zrok/review/setup.json which `pr setup`
+        # persists unconditionally; no need to pass it explicitly.
+        zrok review pr run --runner opencode "${MODEL_ARGS[@]}" --max-parallel 6 \
+          | tee "$RUNNER_TEMP/zrok-dispatch.log"
 
     - name: zrok review pr report
       id: report

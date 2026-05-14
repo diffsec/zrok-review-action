@@ -76,6 +76,55 @@ For other providers (OpenAI, Google, Bedrock, etc.) drop the
 up automatically. The `opencode-env` shape stays the same; just substitute
 the right key (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AWS_*` triple, ...).
 
+### Runner modes: orchestrator vs dispatcher
+
+The action supports two execution paths via `runner-mode`. Both run the
+same subagents over the same diff and produce the same finding store —
+they differ only in **who decides which subagent runs when**.
+
+- **`orchestrator` (default).** A primary `zrok-orchestrator` agent runs
+  inside OpenCode and decides which subagents to dispatch and in what order.
+  Adaptive, handles project quirks well, but only as reliable as the model's
+  multi-step tool-use. Recommended with Claude Sonnet/Opus, GPT-4 class,
+  DeepSeek V4 Pro.
+- **`dispatcher`.** A deterministic Go dispatcher in `zrok` reads a
+  `DispatchPlan` emitted by `zrok review pr setup` and spawns each subagent
+  in parallel via `opencode run`. The LLM's only job is to review code and
+  file findings — no orchestration. Predictable, model-agnostic, and runs
+  reliably with smaller / cheaper models (Qwen Coder, GLM-4.6, DeepSeek
+  V4 Flash) that struggle with multi-step orchestration.
+
+Premium recipe — strong model, orchestrator mode:
+
+```yaml
+- uses: diffsec/zrok-review-action@v1
+  with:
+    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    model: anthropic/claude-sonnet-4-5
+    severity-threshold: high
+    block-on: critical
+    # runner-mode: orchestrator     # default
+```
+
+Cost-constrained recipe — cheaper model, dispatcher mode:
+
+```yaml
+- uses: diffsec/zrok-review-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    opencode-env: |
+      OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+    model: openrouter/qwen/qwen3-coder-plus
+    runner-mode: dispatcher
+    severity-threshold: high
+```
+
+Both modes consume the same opengrep findings, run the same SAST-triage
+step, and produce the same PR comment + SARIF artifacts — `runner-mode`
+is an internal execution-strategy switch that doesn't change the user-
+visible contract.
+
 ## Inputs
 
 | Input | Default | Notes |
@@ -97,6 +146,7 @@ the right key (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AWS_*` triple, ...).
 | `opengrep-rules-ref` | `main` | git ref of `opengrep/opengrep-rules` to clone. |
 | `opengrep-config` | `security` | Subdirectory of opengrep-rules (e.g. `python`, `security`) or a registry shorthand (e.g. `p/security-audit`). |
 | `profile` | `fast` | Orchestrator profile. `fast` = SAST triage + parallel analysis only (~3-5 min, advisory). `deep` = adds recon, validation, per-critical-finding review (~20-30 min, thorough). |
+| `runner-mode` | `orchestrator` | `orchestrator` uses an LLM-orchestrator agent to dispatch subagents (best with strong models). `dispatcher` uses zrok's deterministic Go dispatcher — model-agnostic, parallel, substantially cheaper for smaller models that struggle with multi-step tool orchestration. |
 | `allow-agent-rules` | `false` | (v1.1) Permit the orchestrator to author new opengrep rules via `zrok rule add`. New rules apply to the **next** PR. |
 | `allow-agent-exceptions` | `false` | (v1.1) Permit the orchestrator to author finding suppressions via `zrok exception add`. Mandatory `expires` keeps suppressions from accumulating silently. |
 
@@ -160,11 +210,18 @@ shell commands.
    then `zrok sast --config <rules> --diff $BASE` populates the store
    with deterministic SAST findings (`created_by: opengrep`,
    `status: open`).
-4. `opencode run --agent zrok-orchestrator` — OpenCode dispatches
-   subagents through recon → SAST-triage → analysis → validation →
-   review. `sast-triage-agent` filters false positives from the
-   opengrep results before the LLM agents pile on; remaining LLM
-   findings dedup against confirmed SAST findings via fingerprint.
+4. Run the subagents — one of two paths, selected by `runner-mode`:
+   - **orchestrator** (default): `opencode run --agent zrok-orchestrator`.
+     OpenCode dispatches subagents through recon → SAST-triage → analysis
+     → validation → review.
+   - **dispatcher**: `zrok review pr run --runner opencode`. zrok's
+     deterministic dispatcher reads the plan persisted at
+     `.zrok/review/setup.json` and spawns each subagent in parallel via
+     `opencode run`.
+
+   Either way, `sast-triage-agent` filters false positives from the
+   opengrep results before the LLM analysis agents pile on; remaining
+   LLM findings dedup against confirmed SAST findings via fingerprint.
 5. `zrok review pr report --base $BASE` — filters findings to the diff,
    renders the PR comment and SARIF.
 6. Upload SARIF to code-scanning, post comment via `gh api`, enforce
